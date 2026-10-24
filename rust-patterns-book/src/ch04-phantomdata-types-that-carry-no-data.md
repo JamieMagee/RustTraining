@@ -45,21 +45,24 @@ struct Slice<'a, T> {
 
 Use `PhantomData` to prevent mixing values from different "sessions" or "contexts":
 
-```rust
+This example intentionally fails to compile at the cross-arena lookup, even when
+the handle is allocated inside the inner closure:
+
+```rust,compile_fail,E0521
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
 /// A handle branded to a specific arena instance.
-/// Invariant over 'arena — prevents using a handle from one arena with another.
 struct ArenaHandle<'arena> {
     index: usize,
-    _brand: PhantomData<*mut &'arena ()>,
+    _phantom: PhantomData<&'arena ()>,
 }
 
 /// An arena that brands each handle with its unique lifetime.
+/// Invariant over 'arena — prevents shortening the brand to match another arena.
 struct Arena<'arena> {
     data: RefCell<Vec<String>>,
-    _phantom: PhantomData<&'arena ()>,
+    _brand: PhantomData<*mut &'arena ()>,
 }
 
 /// Create an arena and pass it to a closure.
@@ -67,7 +70,7 @@ struct Arena<'arena> {
 fn with_arena<R>(f: impl for<'arena> FnOnce(&Arena<'arena>) -> R) -> R {
     let arena = Arena {
         data: RefCell::new(Vec::new()),
-        _phantom: PhantomData,
+        _brand: PhantomData,
     };
     f(&arena)
 }
@@ -78,7 +81,7 @@ impl<'arena> Arena<'arena> {
         let mut data = self.data.borrow_mut();
         let index = data.len();
         data.push(value);
-        ArenaHandle { index, _brand: PhantomData }
+        ArenaHandle { index, _phantom: PhantomData }
     }
 
     /// Look up by handle — only accepts handles from THIS arena
@@ -90,16 +93,22 @@ impl<'arena> Arena<'arena> {
 
 fn main() {
     with_arena(|arena1| {
-        let handle1 = arena1.alloc("hello".to_string());
-        println!("{}", arena1.get(&handle1)); // ✅
+        with_arena(|arena2| {
+            let handle1 = arena1.alloc("hello".to_string());
+            println!("{}", arena1.get(&handle1)); // ✅
 
-        // Can't use handle1 with a different arena — compile-time error
-        // with_arena(|arena2| {
-        //     arena2.get(&handle1); // ❌ borrowed data escapes outside of closure
-        // });
+            // Can't use handle1 with a different arena — compile-time error
+            arena2.get(&handle1); // ❌ borrowed data escapes outside of closure
+        });
     });
 }
 ```
+
+The arena must be **invariant** over `'arena`: otherwise, a shared reference to an
+outer arena can be shortened to an inner arena's brand. Making only the handle
+invariant is not enough — allocating from the outer arena inside the inner closure
+can then produce a handle with the inner brand. `PhantomData<*mut &'arena ()>`
+fixes the arena's brand, while the handle can remain covariant.
 
 ### Unit-of-Measure Pattern
 
@@ -404,4 +413,3 @@ fn main() {
 </details>
 
 ***
-
